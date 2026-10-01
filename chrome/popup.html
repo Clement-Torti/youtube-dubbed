@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { margin: 0; width: 320px; background: #1f1f1f; color: #f1f1f1; font: 13px/1.35 Roboto, "Segoe UI", Arial, sans-serif; }
+    .wrap { padding: 14px 16px 16px; }
+    h1 { font-size: 15px; font-weight: 500; margin: 0 0 12px; }
+    .status { color: #a8a8a8; font-size: 12px; min-height: 16px; margin: 10px 0 8px; }
+    .status.error { color: #ff8a8a; }
+    .main { width: 100%; border: 0; border-radius: 8px; padding: 11px; font: 500 14px Roboto, Arial, sans-serif;
+      background: #f472b6; color: #fff; cursor: pointer; }
+    .main:disabled { opacity: .5; cursor: default; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>YouTube Dubbing &amp; Translate</h1>
+    <div id="settings"></div>
+    <div class="status" id="status"></div>
+    <button class="main" id="main">Dub this video</button>
+  </div>
+  <script src="shared/config.js"></script>
+  <script src="shared/settings-ui.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

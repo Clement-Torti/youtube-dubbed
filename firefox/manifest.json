@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Dubbing & Translate",
+  "version": "1.0.2",
+  "description": "Translate YouTube subtitles and dub them with natural voices. The video speed adapts so the dub always stays in sync.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "youtube-dubbing@local",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": { "required": ["websiteContent"] }
+    },
+    "gecko_android": { "strict_min_version": "142.0" }
+  },
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "https://m.youtube.com/*",
+    "https://translate.googleapis.com/*",
+    "https://translate.google.com/*",
+    "https://speech.platform.bing.com/*"
+  ],
+  "background": { "scripts": ["background.js"] },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" }
+  },
+  "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*", "https://m.youtube.com/*"],
+      "js": ["content/page-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://www.youtube.com/*", "https://m.youtube.com/*"],
+      "js": [
+        "shared/config.js",
+        "shared/settings-ui.js",
+        "content/captions.js",
+        "content/engine.js",
+        "content/ui.js",
+        "content/main.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
