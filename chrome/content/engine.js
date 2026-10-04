@@ -18,7 +18,29 @@
   const TTS_CONCURRENCY = 3;
   const BOUNDARY_EPS = 0.04;  // seconds of video before the boundary where we hold
   const MAX_LATE_FRACTION = 0.6;
-  const TTS_RETRY_DELAYS = [2000, 5000, 10000]; // waits before the 2nd, 3rd and 4th attempt
+  // After a voice failure, ALL voice requests pause (one shared cooldown) instead of every line
+  // retrying on its own, which would burst requests at a struggling or throttling service.
+  const TTS_COOLDOWNS = { NETWORK: [3000, 6000, 10000], RATE_LIMITED: [15000, 30000, 60000], OTHER: [2000, 5000, 10000] };
+  const MAX_ATTEMPTS_OTHER = 3; // lines are only dropped for unexpected errors, never for network/throttling
+
+  // Voices already generated on this page, so restarting the dub or seeking back costs no request.
+  const voiceCache = new Map(); // `${voice}|${rate}|${text}` -> { chunks, provider }
+  const VOICE_CACHE_MAX = 500;
+  // Downloads in flight: a dub restarted quickly reuses them instead of requesting the same line twice.
+  const voiceRequests = new Map(); // same key -> Promise
+  // Health of the voice service, shared by every dub on this page so restarting doesn't reset the cooldown.
+  const voiceHealth = {
+    failures: 0,   // consecutive failures
+    until: 0,      // no voice request before this time (performance.now)
+    kind: null,    // why: NETWORK | RATE_LIMITED | OTHER
+  };
+
+  const errorKind = e => {
+    const m = String((e && e.message) || e);
+    if (m.startsWith('RATE_LIMITED')) return 'RATE_LIMITED';
+    if (m.startsWith('NETWORK') || m.includes('Failed to fetch')) return 'NETWORK';
+    return 'OTHER';
+  };
 
   // ------------------------------------------------------------ audio graph
 
@@ -156,7 +178,7 @@
   // ------------------------------------------------------------ Dubber
 
   AD.Dubber = class Dubber {
-    constructor({ video, segments, sourceLang, needTranslate, settings, onStatus, onSubtitle, onFatal, isHovering }) {
+    constructor({ video, segments, sourceLang, needTranslate, settings, onStatus, onSubtitle, onFatal, isHovering, onWait }) {
       this.video = video;
       this.segments = segments;
       this.sourceLang = sourceLang;
@@ -165,6 +187,7 @@
       this.onSubtitle = onSubtitle;
       this.onFatal = onFatal;
       this.isHovering = isHovering || (() => false);
+      this.onWait = onWait || (() => {});
       this.shownText = '';
       this.idx = 0;             // next segment to speak
       this.cur = null;          // segment currently being spoken
@@ -189,6 +212,9 @@
         this.hold = null;  // any (re)start of the video ends a hold
       };
       this.skipQuietly = true;  // starting mid-video: earlier lines are expected to be passed
+      this.armedFrom = this.video.currentTime; // the watchdog ignores lines that began before this
+      this.onOnline = () => { if (voiceHealth.kind === 'NETWORK') voiceHealth.until = 0; };
+      window.addEventListener('online', this.onOnline);
       this.video.addEventListener('seeking', this.onSeeking);
       this.video.addEventListener('play', this.onPlay);
       this.timer = setInterval(() => {
@@ -211,6 +237,8 @@
       clearInterval(this.timer);
       this.video.removeEventListener('seeking', this.onSeeking);
       this.video.removeEventListener('play', this.onPlay);
+      window.removeEventListener('online', this.onOnline);
+      this.wait(null);
       this.stopAudio();
       if (this.hold) {
         this.hold = null;
@@ -306,9 +334,12 @@
       if (!this.dubAudio) return;
       const segs = this.segments;
       const from = Math.max(0, this.idx - (this.cur ? 1 : 0));
-      for (let i = from; i < Math.min(segs.length, from + LOOKAHEAD) && this.ttsActive < TTS_CONCURRENCY; i++) {
+      // During a cooldown nothing is requested; right after one, a single request probes the
+      // service before going back to full speed.
+      const concurrency = performance.now() < voiceHealth.until ? 0 : voiceHealth.failures ? 1 : TTS_CONCURRENCY;
+      for (let i = from; i < Math.min(segs.length, from + LOOKAHEAD) && this.ttsActive < concurrency; i++) {
         const s = segs[i];
-        if (s.tr != null && !s.chunks && !s.ttsBusy && !s.failed && !(s.retryAt > performance.now())) this.synthesize(s);
+        if (s.tr != null && !s.chunks && !s.ttsBusy && !s.failed) this.synthesize(s);
       }
       for (let i = from; i < Math.min(segs.length, from + DECODE_AHEAD); i++) {
         const s = segs[i];
@@ -326,11 +357,39 @@
     synthesize(s) {
       if (!s.tr.trim()) { s.failed = true; return; }
       const gen = this.voiceGen;
+      const rate = this.settings.dubRate;
+      const key = `${this.voice}|${rate}|${s.tr}`;
+      const cached = voiceCache.get(key);
+      if (cached) {
+        s.chunks = cached.chunks;
+        s.stretch = cached.provider === 'google' ? rate : 1;
+        return;
+      }
       s.tries = s.tries || 0;
       s.ttsBusy = true;
       this.ttsActive++;
-      const rate = this.settings.dubRate;
-      AD.bg({ type: 'tts', text: s.tr, voice: this.voice, lang: this.targetLang, rate })
+      let request = voiceRequests.get(key);
+      if (!request) {
+        request = AD.bg({ type: 'tts', text: s.tr, voice: this.voice, lang: this.targetLang, rate });
+        voiceRequests.set(key, request);
+        // Bookkeeping once per real request (other dubs may be waiting on the same one).
+        request.then(r => {
+          if (voiceHealth.failures) AD.log.info('voice service is answering again');
+          voiceHealth.failures = 0;
+          voiceHealth.kind = null;
+          voiceCache.set(key, { chunks: r.chunks, provider: r.provider });
+          if (voiceCache.size > VOICE_CACHE_MAX) voiceCache.delete(voiceCache.keys().next().value);
+        }, e => {
+          const kind = errorKind(e);
+          const delays = TTS_COOLDOWNS[kind];
+          const pause = delays[Math.min(voiceHealth.failures, delays.length - 1)];
+          voiceHealth.failures++;
+          voiceHealth.kind = kind;
+          voiceHealth.until = Math.max(voiceHealth.until, performance.now() + pause);
+          this.logOnce('voice-' + kind, `voice failed for line ${s.i}: ${e.message}. Pausing voice requests for ${pause / 1000}s`);
+        }).finally(() => voiceRequests.delete(key));
+      }
+      request
         .then(r => {
           if (gen !== this.voiceGen) return;
           s.chunks = r.chunks;
@@ -342,13 +401,9 @@
           }
         })
         .catch(e => {
-          AD.log.warn(`voice failed for line ${s.i} (attempt ${s.tries + 1})`, e);
           if (gen !== this.voiceGen) return;
-          // Voice errors are usually temporary (rate limit, network): retry patiently while the
-          // video waits, instead of silently dropping the line.
-          if (++s.tries <= TTS_RETRY_DELAYS.length) {
-            s.retryAt = performance.now() + TTS_RETRY_DELAYS[s.tries - 1];
-          } else {
+          // Network trouble and throttling are temporary: keep waiting for them, never drop the line.
+          if (errorKind(e) === 'OTHER' && ++s.tries >= MAX_ATTEMPTS_OTHER) {
             s.failed = true;
             this.onStatus('dubbing', `Some lines have no voice (${e.message}). Dubbing continues.`);
           }
@@ -368,6 +423,38 @@
 
     // ---------------------------------------------------------- playback control
 
+    // "Try again now" from the waiting message: end the cooldown (still one probe request first).
+    retryNow() {
+      AD.log.info('retrying the voice now (requested by the viewer)');
+      voiceHealth.until = 0;
+    }
+
+    // Friendly message over the player while the video waits for the dub (null hides it).
+    wait(message) {
+      const key = message ? message.title + '|' + message.text + '|' + !!message.retryable : '';
+      if (key === this.waitKey) return;
+      this.waitKey = key;
+      this.onWait(message);
+    }
+
+    waitMessage() {
+      const left = Math.ceil((voiceHealth.until - performance.now()) / 1000);
+      const retry = left > 0 ? `Retrying in ${left}s.` : 'Retrying now.';
+      const retryable = left > 0; // offer "Try again now" while a countdown is running
+      switch (voiceHealth.kind) {
+        case 'NETWORK':
+          return navigator.onLine === false
+            ? { title: 'No internet connection', text: "Dubbing will resume by itself as soon as you're back online.", retryable }
+            : { title: "Can't reach the voice service", text: `Check your connection. ${retry} The video will continue automatically.`, retryable };
+        case 'RATE_LIMITED':
+          return { title: 'The voice service is busy', text: `Google is limiting voice requests for a moment. ${retry} Please wait, the video will continue automatically.`, retryable };
+        case 'OTHER':
+          return { title: 'Voice problem', text: `${retry} Please wait a moment.`, retryable };
+        default:
+          return { title: 'Preparing the dubbed voice…', text: 'The video will continue in a moment.' };
+      }
+    }
+
     setHold(reason) {
       if (this.hold !== reason) {
         this.holdSince = performance.now();
@@ -383,6 +470,7 @@
       const waited = (performance.now() - (this.holdSince || 0)) / 1000;
       if (waited > 3) AD.log.warn(`video was held ${waited.toFixed(1)}s (${this.hold})`);
       this.hold = null;
+      this.wait(null);
       if (this.video.paused) this.video.play().catch(() => {});
     }
 
@@ -418,6 +506,7 @@
       src.onended = () => { if (this.cur === p && !p.paused) this.finishSegment(); };
       this.cur = p;
       s.played = true;
+      this.wait(null);
       if (this.settings.originalMode === 'duck') AD.audio.setVideoGain(this.settings.duckLevel, 0.05);
       this.onSubtitle(s.tr);
     }
@@ -469,6 +558,8 @@
       this.setRate(this.baseRate);
       this.idx = 0; // tick() advances to the segment at the new position
       this.skipQuietly = true;
+      this.armedFrom = this.video.currentTime;
+      this.wait(null);
     }
 
     tick() {
@@ -495,6 +586,7 @@
           if (this.hold !== 'audio') AD.log.warn(`audio engine is ${AD.audio.ctx.state}: the browser needs a click on the page before it plays sound`);
           this.setHold('audio');
           this.status('Click anywhere on the page to enable the dubbed audio');
+          this.wait({ title: 'Sound is blocked by the browser', text: 'Click anywhere on the video to enable the dubbed audio.' });
         }
         return;
       }
@@ -544,6 +636,7 @@
       const s = segs[this.idx];
       if (!s || t < s.start - 0.02) {
         if (this.hold) this.releaseHold();
+        this.wait(null);
         this.setRate(this.baseRate);
         this.status(s ? 'Dubbing…' : 'Dubbing finished');
         return;
@@ -557,7 +650,9 @@
       if (!s.buffer) {
         this.setRate(this.baseRate); // no voice playing: never keep the video slowed while waiting
         this.setHold('loading');
-        this.status(s.tries ? 'Voice service busy, retrying…' : 'Preparing the voice…');
+        const message = this.waitMessage();
+        this.status(`${message.title} ${message.text}`);
+        this.wait(message);
         return;
       }
       let offset = 0;
@@ -601,7 +696,7 @@
       if (now - (this.lastWatch || 0) < 1000) return;
       this.lastWatch = now;
       const s = this.segments.find(x => t >= x.start && t < this.boundary(x.i));
-      if (!s || s.played || s.failed || s.skipped || s.reported || t - s.start < 2) return;
+      if (!s || s.played || s.failed || s.skipped || s.reported || t - s.start < 2 || s.start < this.armedFrom) return;
       s.reported = true;
       AD.log.warn(`line ${s.i} (at ${s.start.toFixed(1)}s) should be dubbed but nothing is playing`, this.snapshot(s));
     }
@@ -613,13 +708,15 @@
         index: x.i, start: +x.start.toFixed(2), text: x.text.slice(0, 80), translated: x.tr != null,
         voiceDownloaded: !!x.chunks, voiceDecoded: !!x.buffer, played: !!x.played, failed: !!x.failed,
         skipped: !!x.skipped, attempts: x.tries || 0, downloading: !!x.ttsBusy, decoding: !!x.decoding,
-        retryInSeconds: x.retryAt > performance.now() ? +((x.retryAt - performance.now()) / 1000).toFixed(1) : 0,
       };
       return {
         videoTime: +v.currentTime.toFixed(2), videoPaused: v.paused, videoReadyState: v.readyState,
         videoSpeed: v.playbackRate, normalSpeed: this.baseRate, nextLineIndex: this.idx, hold: this.hold,
         playing: this.cur ? { line: this.cur.seg.i, paused: this.cur.paused } : null,
         audioEngine: AD.audio.ctx && AD.audio.ctx.state, downloadsInProgress: this.ttsActive,
+        voiceFailuresInARow: voiceHealth.failures, voicePausedFor: voiceHealth.kind,
+        voiceRetryInSeconds: Math.max(0, +((voiceHealth.until - performance.now()) / 1000).toFixed(1)),
+        online: navigator.onLine,
         adShowing: isAdShowing(), line: line(s), next: line(s && this.segments[s.i + 1]),
       };
     }

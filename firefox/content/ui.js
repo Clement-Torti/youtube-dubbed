@@ -25,6 +25,18 @@
       background: #fff; color: #111; font-family: Roboto, Arial, sans-serif; font-weight: 500; padding: .25em .6em;
       border-radius: 6px; white-space: nowrap; box-shadow: 0 4px 14px rgba(0, 0, 0, .45); }
     .autodub-panel-host { position: absolute; top: 12px; right: 12px; z-index: 75; display: none; }
+    .autodub-wait { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 70; display: none;
+      align-items: center; gap: 14px; box-sizing: border-box; width: max-content; max-width: min(460px, 86%);
+      padding: 14px 18px; border-radius: 12px; background: rgba(15, 15, 15, .9); color: #fff; pointer-events: none;
+      font: 14px/1.4 Roboto, Arial, sans-serif; box-shadow: 0 8px 30px rgba(0, 0, 0, .45); }
+    .autodub-wait b { display: block; font-size: 15px; font-weight: 500; margin-bottom: 2px; }
+    .autodub-wait span { color: #ddd; }
+    .autodub-retry { display: block; margin-top: 10px; pointer-events: auto; cursor: pointer; border: 0; border-radius: 6px;
+      padding: 7px 14px; background: #f472b6; color: #fff; font: 500 13px Roboto, Arial, sans-serif; }
+    .autodub-retry:hover { filter: brightness(1.08); }
+    .autodub-spinner { flex: none; width: 28px; height: 28px; border-radius: 50%; border: 3px solid rgba(255, 255, 255, .25);
+      border-top-color: #f472b6; animation: autodub-spin .9s linear infinite; }
+    @keyframes autodub-spin { to { transform: rotate(360deg); } }
     .autodub-panel-host.autodub-sheet { position: fixed; top: auto; left: 0; right: 0; bottom: 0; z-index: 2147483000; }
     .autodub-fab { position: absolute; top: 8px; left: 8px; z-index: 2147483000; pointer-events: auto; width: 40px; height: 40px; padding: 8px;
       border: 0; border-radius: 50%; background: rgba(0, 0, 0, .55); color: #fff; box-sizing: border-box; }
@@ -53,8 +65,9 @@
 
   const ui = AD.ui = { state: 'idle', message: '', hideTimer: null, hovering: false, pending: null };
 
-  ui.init = function ({ onToggle }) {
+  ui.init = function ({ onToggle, onRetry }) {
     ui.onToggle = onToggle;
+    ui.onRetry = onRetry;
     if (!document.getElementById('autodub-style')) {
       const style = document.createElement('style');
       style.id = 'autodub-style';
@@ -97,6 +110,52 @@
     if (ui.panelHost.parentNode !== container) container.appendChild(ui.panelHost);
     ui.panelHost.classList.toggle('autodub-sheet', ui.mobile);
     if (!ui.sub || !p.contains(ui.sub)) buildSubtitle(p);
+    if (!ui.waitEl || !p.contains(ui.waitEl)) buildWait(p);
+  };
+
+  function buildWait(p) {
+    const box = document.createElement('div');
+    box.className = 'autodub-wait';
+    const spinner = document.createElement('div');
+    spinner.className = 'autodub-spinner';
+    const text = document.createElement('div');
+    const retry = document.createElement('button');
+    retry.className = 'autodub-retry';
+    retry.textContent = 'Try again now';
+    // The click must not reach the player (play/pause).
+    for (const ev of ['pointerdown', 'mousedown', 'dblclick']) retry.addEventListener(ev, e => e.stopPropagation());
+    retry.addEventListener('click', e => { e.stopPropagation(); retryAction(); });
+    text.append(document.createElement('b'), document.createElement('span'), retry);
+    box.append(spinner, text);
+    p.appendChild(box);
+    ui.waitEl = box;
+    ui.retryBtn = retry;
+    if (ui.waitMessage) fillWait(ui.waitMessage);
+  }
+
+  function fillWait(message) {
+    ui.waitEl.querySelector('b').textContent = message.title;
+    ui.waitEl.querySelector('span').textContent = message.text;
+    ui.retryBtn.style.display = message.retryable ? '' : 'none';
+  }
+
+  function retryAction() {
+    if (ui.onRetry) ui.onRetry();
+  }
+
+  // Shown while the video waits for the dub. Short waits (< 0.6 s) never show it, to avoid flicker.
+  ui.showWait = function (message) {
+    ui.waitMessage = message;
+    clearTimeout(ui.waitTimer);
+    if (!ui.waitEl) return;
+    if (!message) {
+      ui.waitEl.style.display = 'none';
+      return;
+    }
+    fillWait(message);
+    if (ui.waitEl.style.display !== 'flex') {
+      ui.waitTimer = setTimeout(() => { if (ui.waitMessage) ui.waitEl.style.display = 'flex'; }, 600);
+    }
   };
 
   function makeButton(className) {
@@ -136,6 +195,9 @@
     const t = e.changedTouches && e.changedTouches[0];
     if (!t) return null;
     if (inside(ui.btn, t.clientX, t.clientY)) return { kind: 'button' };
+    if (ui.retryBtn && ui.retryBtn.style.display !== 'none' && ui.waitEl.style.display === 'flex' && inside(ui.retryBtn, t.clientX, t.clientY)) {
+      return { kind: 'retry' };
+    }
     if (ui.sub && ui.sub.style.display === 'block' && inside(ui.sub, t.clientX, t.clientY)) {
       const word = document.elementsFromPoint(t.clientX, t.clientY).find(el => el.classList && el.classList.contains('autodub-word'));
       return { kind: 'subtitle', word: word || null };
@@ -150,6 +212,7 @@
     e.stopImmediatePropagation();
     if (e.type !== 'touchend') return;
     if (hit.kind === 'button') return buttonAction();
+    if (hit.kind === 'retry') return retryAction();
     // Tap a word: show its French translation and keep this subtitle (like hovering) until
     // the same word or anything outside the subtitle is tapped.
     if (!hit.word || ui.tipWord === hit.word) return stopReading();

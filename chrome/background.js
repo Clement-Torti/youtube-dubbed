@@ -140,8 +140,16 @@ async function googleTts(text, lang) {
   for (let i = 0; i < parts.length; i++) {
     const url = `https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=${encodeURIComponent(lang)}` +
       `&total=${parts.length}&idx=${i}&textlen=${parts[i].length}&q=${encodeURIComponent(parts[i])}`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Google TTS HTTP ${res.status}`);
+    // Error messages start with a code the page uses to pick the right wait and message:
+    // NETWORK (can't reach Google), RATE_LIMITED (Google is throttling us), HTTP (anything else).
+    let res;
+    try {
+      res = await fetch(url, { redirect: 'manual' }); // a throttling redirect would otherwise look like a network error
+    } catch (e) {
+      throw new Error(`NETWORK: can't reach the Google voice service (${navigator.onLine === false ? 'offline' : e.message})`);
+    }
+    if (res.type === 'opaqueredirect' || res.status === 429) throw new Error('RATE_LIMITED: Google is limiting voice requests');
+    if (!res.ok) throw new Error(`HTTP: Google voice returned HTTP ${res.status}`);
     buffers.push(await res.arrayBuffer());
   }
   return buffers;

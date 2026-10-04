@@ -111,6 +111,7 @@
         onStatus: (state, msg) => { if (my === session) setStatus(state, msg); },
         onSubtitle: text => { if (my === session) AD.ui.showSubtitle(text); },
         isHovering: () => AD.ui.isHovering(),
+        onWait: message => { if (my === session) AD.ui.showWait(message); },
         onFatal: msg => { if (my === session) { stop(); setStatus('error', msg); } },
       });
       dubber.start();
@@ -126,6 +127,7 @@
     session++;
     if (dubber) { dubber.stop(); dubber = null; }
     AD.ui.clearSubtitle();
+    AD.ui.showWait(null);
     setStatus('idle', '');
   }
 
@@ -158,7 +160,7 @@
 
   (async () => {
     settings = await AD.loadSettings();
-    AD.ui.init({ onToggle: toggle });
+    AD.ui.init({ onToggle: toggle, onRetry: () => { if (dubber) dubber.retryNow(); } });
     AD.ui.applySettings(settings);
     document.addEventListener('yt-navigate-finish', onNavigate);
     // m.youtube.com doesn't fire yt-navigate-finish: also watch the URL.
