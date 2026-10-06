@@ -53,7 +53,7 @@ AD.DEFAULTS = {
   subtitleSize: 1,
   dubRate: 1,             // fixed speaking speed of the dubbed voice (1 = natural)
   minRate: 0.25,          // slowest the video may play to wait for the dub
-  autoDub: false,
+  autoRules: [],          // original languages to dub automatically ('*' = any), into `lang`
   translator: 'youtube',  // 'youtube' = YouTube auto-translate (Google Translate as fallback) | 'google'
 };
 
@@ -72,7 +72,15 @@ AD.voiceFor = s => {
   return lang.voices.some(v => v[0] === chosen) ? chosen : lang.voices[0][0];
 };
 
-AD.loadSettings = async () => ({ ...AD.DEFAULTS, ...(await chrome.storage.local.get(null)) });
+AD.loadSettings = async () => {
+  const s = { ...AD.DEFAULTS, ...(await chrome.storage.local.get(null)) };
+  // Older versions had a single on/off "auto-dubbing" switch: on = every video.
+  if (!Array.isArray(s.autoRules)) s.autoRules = s.autoDub ? ['*'] : [];
+  if (s.autoDub !== undefined && !(await chrome.storage.local.get('autoRules')).autoRules) {
+    chrome.storage.local.set({ autoRules: s.autoRules });
+  }
+  return s;
+};
 AD.saveSettings = patch => chrome.storage.local.set(patch);
 
 // YouTube enforces Trusted Types; wrap markup so innerHTML assignments are accepted.

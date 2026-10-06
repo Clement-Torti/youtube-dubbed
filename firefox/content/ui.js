@@ -50,7 +50,7 @@
       font: 13px/1.35 Roboto, Arial, sans-serif; scrollbar-width: thin; }
     .title { font-size: 15px; font-weight: 500; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; }
     .close { background: none; border: 0; color: #aaa; font-size: 20px; cursor: pointer; line-height: 1; }
-    .status { color: #a8a8a8; font-size: 12px; min-height: 16px; margin: 10px 0 8px; }
+    .status { color: #a8a8a8; font-size: 12px; min-height: 16px; margin: 8px 0 6px; }
     .status.error { color: #ff8a8a; }
     .main { width: 100%; border: 0; border-radius: 8px; padding: 11px; font: 500 14px Roboto, Arial, sans-serif;
       background: #f472b6; color: #fff; cursor: pointer; }
@@ -354,9 +354,9 @@
     root.innerHTML = AD.html(`<style>${PANEL_CSS}</style>
       <div class="panel">
         <div class="title"><span>YouTube Dubbing &amp; Translate</span><button class="close" title="Close">×</button></div>
-        <div class="settings"></div>
-        <div class="status"></div>
         <button class="main"></button>
+        <div class="status"></div>
+        <div class="settings"></div>
       </div>`);
     AD.mountSettings(root.querySelector('.settings'));
     root.querySelector('.close').addEventListener('click', () => ui.togglePanel(false));

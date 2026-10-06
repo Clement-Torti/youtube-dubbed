@@ -53,6 +53,18 @@
     return fresh() ? lastTimedtext : null;
   }
 
+  // Audio tracks of videos with several (official dubs ".3", YouTube AI dubs ".10"): ids look like
+  // "fr-FR.4", where ".4" marks the original audio. Videos with a single track list none.
+  function audioTracks(r, list) {
+    const ids = new Set(((list && list.audioTracks) || []).map(a => a.audioTrackId).filter(Boolean));
+    for (const f of (r && r.streamingData && r.streamingData.adaptiveFormats) || []) if (f.audioTrack && f.audioTrack.id) ids.add(f.audioTrack.id);
+    const original = [...ids].find(id => /\.4$/.test(id));
+    return {
+      audioLangs: [...ids].map(id => id.split('.')[0]),
+      originalAudioLang: original ? original.split('.')[0] : null,
+    };
+  }
+
   const handlers = {
     getInfo() {
       const p = player();
@@ -71,6 +83,7 @@
         })),
         // Languages YouTube can auto-translate the captions into.
         translationLanguages: ((list && list.translationLanguages) || []).map(l => l.languageCode),
+        ...audioTracks(r, list),
       };
     },
 

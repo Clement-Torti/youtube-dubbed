@@ -26,7 +26,11 @@
   }
 
   const currentVideoId = () => new URLSearchParams(location.search).get('v');
-  const baseLang = c => (c || '').split('-')[0].toLowerCase();
+  // Main language code, with YouTube's legacy codes mapped to ours (iw = Hebrew, in = Indonesian).
+  const baseLang = c => {
+    const base = (c || '').split('-')[0].toLowerCase();
+    return { iw: 'he', in: 'id', ji: 'yi' }[base] || base;
+  };
 
   // YouTube's code for our target language, if it offers auto-translation into it.
   function youtubeLangCode(available, target) {
@@ -139,7 +143,47 @@
     if (id === lastVideoId) return;
     lastVideoId = id;
     stop();
-    if (id && settings.autoDub) setTimeout(() => { if (currentVideoId() === id && !isBusy()) start(); }, 800);
+    if (id) setTimeout(() => { if (currentVideoId() === id && !isBusy()) autoDub(id); }, 800);
+  }
+
+  // The video's original language: its ".4" audio track when it has several, else the language of
+  // YouTube's auto-generated captions (made from the original audio), else its only subtitle track.
+  function originalLanguage(info) {
+    if (info.originalAudioLang) return { lang: info.originalAudioLang, from: 'original audio track' };
+    const asr = info.tracks.find(t => t.kind === 'asr');
+    if (asr) return { lang: asr.languageCode, from: 'auto-generated captions' };
+    if (info.tracks.length === 1) return { lang: info.tracks[0].languageCode, from: 'only subtitle track' };
+    return null;
+  }
+
+  // Automatic dubbing rules: original language in the rules, has subtitles, and YouTube has no audio
+  // track in the dubbing language (then the viewer can just pick YouTube's audio instead).
+  async function autoDub(videoId) {
+    const rules = settings.autoRules || [];
+    if (!rules.length) return;
+    let info = null;
+    for (let i = 0; i < 30 && currentVideoId() === videoId; i++) {
+      info = await page('getInfo').catch(() => null);
+      if (info && info.videoId === videoId) break;
+      await sleep(300);
+    }
+    if (currentVideoId() !== videoId || isBusy() || !info || info.videoId !== videoId) return;
+
+    const name = AD.getLanguage(settings.lang).name;
+    const skip = reason => {
+      AD.log.info('automatic dubbing skipped: ' + reason);
+      AD.ui.setStatus('idle', 'Automatic dubbing skipped: ' + reason + '.');
+    };
+    if (!info.tracks.length) return skip('this video has no subtitles');
+    const original = originalLanguage(info);
+    if (!original) return skip("the video's original language is unknown");
+    const lang = baseLang(original.lang);
+    if (lang === baseLang(settings.lang)) return skip(`the video is already in ${name}`);
+    if (!rules.includes('*') && !rules.some(r => baseLang(r) === lang)) return skip(`no rule for its original language (${original.lang})`);
+    if ((info.audioLangs || []).some(l => baseLang(l) === baseLang(settings.lang))) return skip(`YouTube already offers ${name} audio for this video`);
+
+    AD.log.info(`automatic dubbing: original language ${original.lang} (from the ${original.from}), no ${name} audio track`);
+    start();
   }
 
   chrome.storage.onChanged.addListener(async (_changes, area) => {
